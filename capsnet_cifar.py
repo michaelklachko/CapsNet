@@ -6,13 +6,11 @@ import tensorflow as tf
 
 from utils import *
 
-class CapsNet(object):
-	def __init__(self, batch_size, num_fmaps, num_pcaps, num_classes, cap_sizes, num_iterations, filters=[9, 9],
+class CapsEncoder(object):
+	def __init__(self, batch_size, layer_sizes, cap_sizes, num_iterations, filters=[9, 9],
 				 strides=[1, 2], scope="capsnet"):
 		self.batch_size = batch_size
-		self.num_fmaps = num_fmaps
-		self.num_pcaps = num_pcaps
-		self.num_classes = num_classes
+		self.num_fmaps, self.num_pcaps, self.num_classes = layer_sizes
 		self.cap_sizes = cap_sizes
 		self.num_iterations = num_iterations
 		self.scope = scope
@@ -44,8 +42,7 @@ class CapsNet(object):
 			V = tf.map_fn(self.squash, S)  # applies function to last dim, reshape before or after?
 			V = tf.reshape(V, [self.batch_size, -1, V.shape[-1]])  # (128,1152,8)
 			print 'V:', V.shape
-			dcaps = self.caps_layer(V, self.cap_sizes[1], self.num_classes,
-									num_iterations=self.num_iterations)  # (128,10,16)
+			dcaps = self.caps_layer(V, self.cap_sizes[1], self.num_classes, num_iterations=self.num_iterations)  # (128,10,16)
 			print 'dcaps:', dcaps.shape
 
 			# output for the reconstructing decoder - zero out outputs from all capsules other than the one that should be correct
@@ -96,21 +93,19 @@ class CapsDecoder(object):
 	# input shape (batch_size, num_classes, dcap length)
 	# output shape (batch_size, output_dim, output_dim, channels)
 
-	def __init__(self, batch_size, layers, output_dims, channels=3, scope='decoder'):
+	def __init__(self, batch_size, layers, output_dims, scope='decoder'):
 		self.batch_size = batch_size
 		self.layers = layers
-		self.out_channels = channels
+		self.img_dim, self.out_channels = output_dims
 		self.scope = scope
-		self.output_dims = output_dims
 
 	def __call__(self, features, reuse=False, train=True):
 		with tf.variable_scope(self.scope, reuse=reuse):
 			print '\nProcessing input features {}:\n'.format(features.shape)
-			dim_x, dim_y = self.output_dims
 
 			x = tf.reshape(features, (self.batch_size, -1))
 
-			for i, h in enumerate(self.layers + (dim_x * dim_y * self.out_channels,)):
+			for i, h in enumerate(self.layers):
 				print 'decoder output layer: {} by {}'.format(x.get_shape()[1], h)
 				x = linear(x, h, 'decoder_hidden_layer' + str(i) + '_' + str(h))
 
@@ -119,7 +114,7 @@ class CapsDecoder(object):
 				else:
 					x = lrelu(x, name='relu_decoder_' + str(i) + '_' + str(h))
 
-			image_reconstr = tf.reshape(x, (self.batch_size, dim_x, dim_y, self.out_channels))
+			image_reconstr = tf.reshape(x, (self.batch_size, self.img_dim, self.img_dim, self.out_channels))
 			print "\nReshaping output vector to", image_reconstr.shape
 
 			return image_reconstr
@@ -127,23 +122,24 @@ class CapsDecoder(object):
 
 class Model(object):
 
-	def __init__(self, LR=0.001, batch_size=128, epochs=40, ae_cost_type='mse', ae_weight=10, num_classes=10,
-				 channels=3, img_dim=32, beta1=0.9, debug=False):
+	def __init__(self, encoder=None, decoder=None, dataset=None, LR=0.0006, batch_size=128, epochs=80, ae_cost_type='mse', ae_weight=10,
+				 num_classes=10, channels=3, img_dim=32, beta1=0.9, lmbda=0.5, margin=0.9, debug=False):
+		self.encoder=encoder
+		self.decoder=decoder
 		self.batch_size = batch_size
 		self.epochs = epochs
 		self.LR = LR
-		self.beta1 = beta1  # for ADAM optimizer in the autoencoder
+		self.beta1 = beta1  # for ADAM optimizer
+		self.margin = margin # for margin loss
+		self.lmbda = lmbda  # balancing param for margin loss
 		self.ae_cost_type = ae_cost_type
 		self.ae_weight = ae_weight
 		self.num_classes = num_classes
 		self.debug = debug
 		self.channels = channels
 		self.img_dim = img_dim
-		self.num_train_batches = 50000 / self.batch_size
-		self.num_test_batches = 10000 / self.batch_size
 
-		print "\nLoading CIFAR generator...\n"
-		self.train_gen, self.test_gen = generate_cifar(self.batch_size, data_dir="cifar-10-batches-py")
+		self.prepare_data(dataset)
 
 		self.graph = tf.Graph()
 		with self.graph.as_default():
@@ -153,6 +149,13 @@ class Model(object):
 			self.build_model_training()
 			self.model_init_op = tf.group(tf.global_variables_initializer(), tf.local_variables_initializer())
 
+	def prepare_data(self, dataset):
+		print "\nLoading CIFAR generator...\n"
+		self.train_data, self.test_data = generate_cifar(self.batch_size, data_dir=dataset)
+
+		self.num_train_batches = 50000 / self.batch_size
+		self.num_test_batches = 10000 / self.batch_size
+
 	def setup_placeholders(self):
 		self.orig_input = tf.placeholder(tf.float32, shape=[self.batch_size, self.img_dim, self.img_dim, self.channels], name='orig_input_images')
 		self.encoder_input = tf.placeholder(tf.float32, shape=[self.batch_size, self.img_dim, self.img_dim, self.channels], name='encoder_input_images')
@@ -160,12 +163,9 @@ class Model(object):
 
 	def build_model(self):
 		print "\nBuilding Encoder ({})\n".format("CapsNet")
-		# batch_size, num_fmaps, num_pcaps, num_classes, cap_sizes, num_iterations, filters=[9,9], strides=[1,2], scope="capsnet"
-		self.encoder = CapsNet(self.batch_size, 64, 32, self.num_classes, [8, 16], 3)
 		self.features, correct_features = self.encoder(self.encoder_input, self.class_labels)
 
 		print "\nBuilding reconstructing decoder ({})".format("CapsDecoder")
-		self.decoder = CapsDecoder(self.batch_size, (256, 256), (self.img_dim, self.img_dim), self.channels, scope='decoder')
 		self.reconstructed = self.decoder(correct_features)
 
 
@@ -177,8 +177,10 @@ class Model(object):
 			norms = tf.norm(self.features, axis=1)  # (128, 10, 16) -> (128, 10)  labels: (128)
 
 			for i in range(self.num_classes):
-				presence = tf.cast(tf.equal(self.class_labels, i), tf.float32)  # binary vector indicating if this output position should contain the correct label
-				loss = presence * tf.square(tf.maximum(0., 0.9 - norms[:, i]) + 0.5 * (1. - presence) * tf.square(tf.maximum(0., norms[:, i] - 0.1)))  # (128)
+				# binary vector indicating if this output position should contain the correct label:
+				presence = tf.cast(tf.equal(self.class_labels, i), tf.float32)
+				loss = presence * tf.square(tf.maximum(0., self.margin - norms[:, i]) + self.lmbda * (1. - presence) *
+											tf.square(tf.maximum(0., norms[:, i] - (1 - self.margin))))  # (128)
 				avg_loss = tf.reduce_mean(loss)
 				self.classifier_loss += avg_loss
 
@@ -218,13 +220,12 @@ class Model(object):
 				self.model_grads = print_grads_and_vars(optimizer, self.model_loss, tf.trainable_variables(), print_names=True)
 
 
-	def check_test_loss(self, sess, num_batches):
+	def check_test_loss(self, sess):
 		batch_losses = []
 		batch_number = 0
-		test_cifar = inf_test_gen(self)
 
-		while batch_number < num_batches:
-			test_images, test_labels = test_cifar.next()
+		while batch_number < self.num_batches:
+			test_images, test_labels = self.test_data.next()
 			orig_test_images = np.copy(test_images)
 
 			total_loss, cl_loss, ae_loss = sess.run([self.model_loss, self.classifier_loss, self.ae_loss],
@@ -239,10 +240,8 @@ class Model(object):
 		batch_number = 0
 		batch_accuracies = []
 
-		test_cifar = inf_test_gen(self)
-
 		while batch_number < self.num_test_batches:
-			test_input, test_labels = test_cifar.next()
+			test_input, test_labels = self.test_data.next()
 
 			accuracy = sess.run(self.classifier_accuracy, feed_dict={self.encoder_input: test_input,
 																	 self.class_labels: test_labels})
@@ -261,8 +260,6 @@ class Model(object):
 
 			sess.run(self.model_init_op)
 
-			train_cifar = inf_train_gen(self)
-
 			print "\n\nTraining model for {:d} epochs, LR = {:.4f}, {} training batches, {} test batches\n".format(
 				self.epochs, self.LR, self.num_train_batches, self.num_test_batches)
 
@@ -275,7 +272,7 @@ class Model(object):
 				train_batch_accuracies = []
 
 				while train_batch_number < self.num_train_batches:
-					train_images, train_labels = train_cifar.next()
+					train_images, train_labels = self.train_data.next()
 					orig_train_images = np.copy(train_images)
 
 					_, train_loss, train_accuracy = sess.run([self.model_train_op, self.model_loss, self.classifier_accuracy],
@@ -292,7 +289,7 @@ class Model(object):
 				avg_train_loss = np.mean(train_batch_losses)
 				avg_train_accuracy = np.mean(train_batch_accuracies)
 				avg_test_accuracy = self.check_test_accuracy(sess)
-				total_test_loss, cl_loss, avg_test_ae_loss = self.check_test_loss(sess, self.num_test_batches)
+				total_test_loss, cl_loss, avg_test_ae_loss = self.check_test_loss(sess)
 
 				print(
 				"Epoch {:d}/{:d}: {} | Loss: train {:.5f}, test {:.5f} (cl {:.3f} ae {:.3f}) | Accuracy: train {:.3f} test {:.3f}".format(
@@ -303,5 +300,28 @@ class Model(object):
 
 		sess.close()
 
-CapsulesNet = Model()
-CapsulesNet.train()
+batch_size = 128
+num_classes = 10
+img_dim = 32
+channels = 3
+enc_layer_sizes = (256, 64, num_classes)  # conv fmaps, pcaps, dcaps
+dec_layer_sizes = (512, 1024, img_dim*img_dim*channels)  # decoder FC layers
+cap_sizes = (8, 16)   # pcaps, dcaps
+num_iterations = 3
+
+LR = 0.001
+epochs = 20
+ae_weight = 10
+lmbda = 0.5
+beta1 = 0.9
+ae_cost_type = 'mse'
+debug = False
+
+dataset = "cifar-10-batches-py"
+
+encoder = CapsEncoder(batch_size, enc_layer_sizes, cap_sizes, num_iterations, filters=[9,9], strides=[1,2])
+decoder = CapsDecoder(batch_size, dec_layer_sizes, (img_dim, channels), scope='decoder')
+CapsNet = Model(encoder, decoder, dataset=dataset, LR=LR, batch_size=batch_size, epochs=epochs,
+				ae_cost_type=ae_cost_type, ae_weight=ae_weight, num_classes=num_classes, channels=channels,
+				img_dim=img_dim, beta1=beta1, lmbda=lmbda, debug=debug)
+CapsNet.train()

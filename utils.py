@@ -103,24 +103,16 @@ def cifar_generator(filenames, batch_size, data_dir):
 
 	return get_epoch
 
-
-def inf_train_gen(caller):
-	# this is for Cifar-10
+def data_gen(generator):
 	while True:
-		for images, labels in caller.train_gen():
+		for images, labels in generator():
 			yield images, labels
 
-
-def inf_test_gen(caller):
-	while True:
-		for images, labels in caller.test_gen():
-			yield images, labels
-
-
-# generate_cifar loads one batch at a time
 def generate_cifar(batch_size, data_dir):
-	return (
-		cifar_generator(['data_batch_1', 'data_batch_2', 'data_batch_3', 'data_batch_4', 'data_batch_5'], batch_size,
-						data_dir),
-		cifar_generator(['test_batch'], batch_size, data_dir)
-	)
+	train_gen = cifar_generator(['data_batch_1', 'data_batch_2', 'data_batch_3', 'data_batch_4', 'data_batch_5'], batch_size, data_dir)
+	test_gen = cifar_generator(['test_batch'], batch_size, data_dir)
+
+	train = data_gen(train_gen)
+	test = data_gen(test_gen)
+
+	return train, test
