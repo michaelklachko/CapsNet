@@ -1,3 +1,5 @@
+
+
 import os
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 from datetime import datetime
@@ -224,7 +226,7 @@ class Model(object):
 		batch_losses = []
 		batch_number = 0
 
-		while batch_number < self.num_batches:
+		while batch_number < self.num_test_batches:
 			test_images, test_labels = self.test_data.next()
 			orig_test_images = np.copy(test_images)
 

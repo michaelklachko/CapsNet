@@ -65,54 +65,56 @@ def print_grads_and_vars(opt, loss, var_list, print_names=True):
 	return gradients
 
 
-def unpickle(file):
-	fo = open(file, 'rb')
-	dict = pickle.load(fo)
-	fo.close()
-	return dict['data'], dict['labels']
 
-
-def cifar_generator(filenames, batch_size, data_dir):
-	all_data = []
-	all_labels = []
-	for filename in filenames:
-		data, label = unpickle(data_dir + '/' + filename)
-		all_data.append(data)
-		all_labels.append(label)
-
-	images = np.concatenate(all_data, axis=0)
-	# images = (images.astype(np.float32)/127.5) - 1
-	images = images.astype(np.float32) / 255.
-	images = np.reshape(images, (-1, 3, 32, 32))
-	images = np.transpose(images, (0, 2, 3, 1))
-
-	labels = np.concatenate(all_labels, axis=0)
-
-	batched = list(zip(images, labels))
-
-	def get_epoch():
-		# remove randomness below to compare diff runs for params search
-		# put it back if averaging multiple runs for each param value
-
-		# np.random.shuffle(batched)
-		images, labels = zip(*batched)
-		for i in xrange(len(images) / batch_size):
-			image_batch = np.copy(images[i * batch_size:(i + 1) * batch_size])
-			label_batch = np.copy(labels[i * batch_size:(i + 1) * batch_size])
-			yield (image_batch, label_batch)
-
-	return get_epoch
-
-def data_gen(generator):
-	while True:
-		for images, labels in generator():
-			yield images, labels
 
 def generate_cifar(batch_size, data_dir):
+
+	def unpickle(file):
+		fo = open(file, 'rb')
+		dict = pickle.load(fo)
+		fo.close()
+		return dict['data'], dict['labels']
+
+	def cifar_generator(filenames, batch_size, data_dir):
+		all_data = []
+		all_labels = []
+		for filename in filenames:
+			data, label = unpickle(data_dir + '/' + filename)
+			all_data.append(data)
+			all_labels.append(label)
+
+		images = np.concatenate(all_data, axis=0)
+		# images = (images.astype(np.float32)/127.5) - 1
+		images = images.astype(np.float32) / 255.
+		images = np.reshape(images, (-1, 3, 32, 32))
+		images = np.transpose(images, (0, 2, 3, 1))
+
+		labels = np.concatenate(all_labels, axis=0)
+
+		batched = list(zip(images, labels))
+
+		def get_batch():
+			# remove randomness below to compare diff runs for params search
+			# put it back if averaging multiple runs for each param value
+
+			# np.random.shuffle(batched)
+			images, labels = zip(*batched)
+			for i in xrange(len(images) / batch_size):
+				image_batch = np.copy(images[i * batch_size:(i + 1) * batch_size])
+				label_batch = np.copy(labels[i * batch_size:(i + 1) * batch_size])
+				yield (image_batch, label_batch)
+
+		return get_batch
+
+	def get_batches(generator):
+		while True:
+			for images, labels in generator():
+				yield images, labels
+
 	train_gen = cifar_generator(['data_batch_1', 'data_batch_2', 'data_batch_3', 'data_batch_4', 'data_batch_5'], batch_size, data_dir)
 	test_gen = cifar_generator(['test_batch'], batch_size, data_dir)
 
-	train = data_gen(train_gen)
-	test = data_gen(test_gen)
+	train = get_batches(train_gen)
+	test = get_batches(test_gen)
 
 	return train, test
